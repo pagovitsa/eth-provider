@@ -5,7 +5,8 @@ High-Performance IPC Ethereum Provider with Advanced Optimizations
 ## Features
 
 - 🚀 **High Performance**: Optimized buffer handling and JSON parsing
-- 🔄 **Auto Reconnection**: Exponential backoff reconnection strategy
+- 🔄 **Auto Reconnection**: Exponential backoff reconnection strategy  
+- ⏰ **Auto Disconnect**: Automatically disconnects after inactivity to save resources
 - 💾 **Smart Caching**: LRU cache with TTL for read-only methods
 - 📦 **Batch Processing**: Request batching for better throughput
 - 🔍 **Comprehensive Monitoring**: Detailed metrics and health checks
@@ -76,6 +77,10 @@ const options = {
   retryDelay: 1000,
   maxRetryDelay: 10000,
   backoffMultiplier: 2,
+  
+  // Auto-disconnect
+  autoDisconnectEnabled: true,
+  autoDisconnectTimeout: 5 * 60 * 1000, // 5 minutes
   
   // Logging
   logger: console,

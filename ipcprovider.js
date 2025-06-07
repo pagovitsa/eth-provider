@@ -47,6 +47,12 @@ export class IPCProvider {
         this.cacheTTL = options.cacheTTL || 5000; // 5 seconds
         this.cacheSize = options.cacheSize || 1000;
         
+        // Auto-disconnect configuration
+        this.autoDisconnectEnabled = options.autoDisconnectEnabled || false;
+        this.autoDisconnectTimeout = options.autoDisconnectTimeout || 5 * 60 * 1000; // 5 minutes default
+        this.inactivityTimer = null;
+        this.lastActivityTime = Date.now();
+        
         // Prevent duplicate concurrent requests for same cache key
         this.pendingCacheKeys = new Map();
         
@@ -185,6 +191,9 @@ export class IPCProvider {
                     this.startKeepAlive();
                 }
                 
+                // Start inactivity timer
+                this.startInactivityTimer();
+                
                 resolve();
             });
 
@@ -199,6 +208,7 @@ export class IPCProvider {
                 this.logger.log('🔌 IPC connection closed');
                 this.isConnected = false;
                 this.stopKeepAlive();
+                this.stopInactivityTimer();
 
                 if (this.autoReconnect && !this.isReconnecting) {
                     this.attemptReconnect();
@@ -213,6 +223,7 @@ export class IPCProvider {
                 this.logger.warn('🔚 Socket ended by server');
                 this.isConnected = false;
                 this.stopKeepAlive();
+                this.stopInactivityTimer();
                 
                 if (this.autoReconnect && !this.isReconnecting) {
                     this.attemptReconnect();
@@ -252,6 +263,48 @@ export class IPCProvider {
         if (this.keepAliveTimer) {
             clearInterval(this.keepAliveTimer);
             this.keepAliveTimer = null;
+        }
+    }
+
+    // Start inactivity timer for auto-disconnect
+    startInactivityTimer() {
+        if (!this.autoDisconnectEnabled) return;
+        
+        // Clear existing timer
+        this.stopInactivityTimer();
+        
+        this.inactivityTimer = setTimeout(() => {
+            const timeSinceLastActivity = Date.now() - this.lastActivityTime;
+            
+            // Check if we're truly inactive (no pending requests)
+            if (timeSinceLastActivity >= this.autoDisconnectTimeout && 
+                this.pendingRequests.size === 0 && 
+                this.batchQueue.length === 0) {
+                
+                this.logger.log(`⏰ Auto-disconnecting due to ${this.autoDisconnectTimeout / 1000}s inactivity`);
+                this.disconnect().catch(error => {
+                    this.logger.warn('⚠️ Auto-disconnect failed:', error.message);
+                });
+            } else {
+                // Restart timer if there's still activity or pending requests
+                this.startInactivityTimer();
+            }
+        }, this.autoDisconnectTimeout);
+    }
+    
+    // Stop inactivity timer
+    stopInactivityTimer() {
+        if (this.inactivityTimer) {
+            clearTimeout(this.inactivityTimer);
+            this.inactivityTimer = null;
+        }
+    }
+    
+    // Update last activity time and restart timer
+    updateActivity() {
+        this.lastActivityTime = Date.now();
+        if (this.autoDisconnectEnabled && this.isConnected) {
+            this.startInactivityTimer();
         }
     }
 
@@ -468,6 +521,9 @@ export class IPCProvider {
         if (!this.isConnected) {
             throw new Error('Not connected to IPC socket');
         }
+
+        // Update activity time for auto-disconnect
+        this.updateActivity();
 
         // Check cache for read-only methods
         const cacheKey = `${method}:${JSON.stringify(params)}`;
@@ -799,6 +855,7 @@ export class IPCProvider {
         
         // Stop keep-alive
         this.stopKeepAlive();
+        this.stopInactivityTimer();
         
         // Clear batch timer
         if (this.batchTimer) {

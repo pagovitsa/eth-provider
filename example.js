@@ -8,7 +8,9 @@ async function example() {
         batchRequests: true,
         batchSize: 5,
         autoReconnect: true,
-        logResponseTime: true
+        logResponseTime: true,
+        autoDisconnectEnabled: true,
+        autoDisconnectTimeout: 2 * 60 * 1000 // 2 minutes for demo
     });
 
     try {
