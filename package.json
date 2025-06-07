@@ -1,5 +1,5 @@
 {
-  "name": "@bcoders/provider",
+  "name": "@bcoders.gr/provider",
   "version": "1.0.0",
   "description": "High-Performance IPC Ethereum Provider with Advanced Optimizations",
   "main": "index.js",
@@ -15,7 +15,6 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node example.js",
     "example": "node example.js",
     "dev": "node --inspect example.js",
     "prepare": "npm run check",
