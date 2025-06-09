@@ -39,6 +39,25 @@ const balance = await provider.getBalance('0x...');
 const blockNumber = await provider.getBlockNumber();
 const gasPrice = await provider.getGasPrice();
 
+// NEW: Use specialized methods for log filtering
+// Get mint events from a Uniswap V2 pair
+const mintLogs = await provider.getMint(
+  '0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852', // pair address
+  18900000, // from block
+  'latest'  // to block
+);
+
+// Get custom past logs (e.g., Transfer events)
+const transferLogs = await provider.getPastLogs(
+  '0xa0b86a33e6441b8bb96c0e6a3d8c5b6c7d7e8e9d', // token address
+  19000000, // from block
+  'latest', // to block
+  ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'] // Transfer topic
+);
+
+// Convert values to hex format
+const hexBlock = provider.toHex(19000000); // '0x1216c20'
+
 // Health check
 const health = await provider.healthCheck();
 console.log(health);
@@ -70,8 +89,6 @@ const options = {
   batchTimeout: 10,
   
   // Connection management
-  keepAlive: true,
-  keepAliveInterval: 30000,
   autoReconnect: true,
   maxRetries: 3,
   retryDelay: 1000,
@@ -110,11 +127,16 @@ const options = {
 - `anvil_reset`
 - `debug_traceTransaction`
 
+### Specialized Methods
+- `getMint(address, fromBlock, toBlock)` - Get mint events for a specific contract
+- `getPastLogs(address, fromBlock, toBlock, topics)` - Get past logs with custom topics
+- `toHex(value)` - Convert numbers to hex format
+
 ## Performance Features
 
 - **Buffer Optimization**: Uses native Buffer operations for efficient data handling
 - **JSON Parsing**: Optimized JSON boundary detection and parsing
-- **Connection Pooling**: Maintains persistent connections with keep-alive
+- **Connection Pooling**: Maintains persistent connections with optimized socket settings
 - **Request Pooling**: Object pooling for memory efficiency
 - **Smart Caching**: Caches read-only method results with LRU eviction
 - **Batch Processing**: Groups multiple requests for better throughput

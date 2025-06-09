@@ -27,10 +27,7 @@ export class IPCProvider {
         this.batchSize = options.batchSize || 10;
         this.batchTimeout = options.batchTimeout || 10; // ms
         
-        // Connection pooling and keep-alive
-        this.keepAlive = options.keepAlive !== false;
-        this.keepAliveInterval = options.keepAliveInterval || 30000; // 30s
-        this.keepAliveTimer = null;
+
         
         // Retry configuration with exponential backoff
         this.maxRetries = options.maxRetries || 3;
@@ -175,7 +172,6 @@ export class IPCProvider {
             
             // Socket performance optimizations
             this.socket.setNoDelay(true); // Disable Nagle's algorithm for lower latency
-            this.socket.setKeepAlive(this.keepAlive, this.keepAliveInterval);
             
             // Set larger buffer sizes for better throughput
             this.socket.setDefaultEncoding('utf8');
@@ -185,11 +181,6 @@ export class IPCProvider {
                 this.isConnected = true;
                 this.currentRetries = 0;
                 this.isReconnecting = false;
-                
-                // Start keep-alive ping if enabled
-                if (this.keepAlive) {
-                    this.startKeepAlive();
-                }
                 
                 // Start inactivity timer
                 this.startInactivityTimer();
@@ -207,7 +198,6 @@ export class IPCProvider {
             this.socket.on('close', () => {
                 this.logger.log('🔌 IPC connection closed');
                 this.isConnected = false;
-                this.stopKeepAlive();
                 this.stopInactivityTimer();
 
                 if (this.autoReconnect && !this.isReconnecting) {
@@ -222,7 +212,6 @@ export class IPCProvider {
             this.socket.on('end', () => {
                 this.logger.warn('🔚 Socket ended by server');
                 this.isConnected = false;
-                this.stopKeepAlive();
                 this.stopInactivityTimer();
                 
                 if (this.autoReconnect && !this.isReconnecting) {
@@ -241,30 +230,7 @@ export class IPCProvider {
         });
     }
 
-    // Keep-alive mechanism
-    startKeepAlive() {
-        if (this.keepAliveTimer) {
-            clearInterval(this.keepAliveTimer);
-        }
-        
-        this.keepAliveTimer = setInterval(async () => {
-            if (this.isConnected) {
-                try {
-                    // Send a lightweight request to keep connection alive
-                    await this.request('net_version');
-                } catch (error) {
-                    this.logger.warn('⚠️  Keep-alive failed:', error.message);
-                }
-            }
-        }, this.keepAliveInterval);
-    }
 
-    stopKeepAlive() {
-        if (this.keepAliveTimer) {
-            clearInterval(this.keepAliveTimer);
-            this.keepAliveTimer = null;
-        }
-    }
 
     // Start inactivity timer for auto-disconnect
     startInactivityTimer() {
@@ -845,6 +811,39 @@ export class IPCProvider {
         return result !== false ? result : null;
     }
 
+    // Helper method to convert numbers to hex format
+    toHex(value) {
+        if (typeof value === 'string') {
+            if (value.startsWith('0x')) {
+                return value; // Already hex
+            }
+            if (value === 'latest' || value === 'earliest' || value === 'pending') {
+                return value; // Special block tags
+            }
+        }
+        return '0x' + parseInt(value).toString(16);
+    }
+
+    // Get mint events for a specific address within a block range
+    async getMint(address, fromBlock, toBlock) {
+        return await this.send('eth_getLogs', [{
+            "fromBlock": this.toHex(fromBlock),
+            "toBlock": this.toHex(toBlock),
+            "address": address,
+            "topics": ["0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"]
+        }]);
+    }
+
+    // Get past logs for a specific address within a block range with custom topics
+    async getPastLogs(address, fromBlock, toBlock, topic) {
+        return await this.send('eth_getLogs', [{
+            "fromBlock": this.toHex(fromBlock),
+            "toBlock": this.toHex(toBlock),
+            "address": address,
+            "topics": topic
+        }]);
+    }
+
     // Enhanced disconnect with proper cleanup
     async disconnect() {
         this.logger.log('Disconnecting from IPC');
@@ -853,8 +852,7 @@ export class IPCProvider {
         this.isReconnecting = false;
         this.isDisconnecting = true; // Set disconnecting flag to prevent race conditions
         
-        // Stop keep-alive
-        this.stopKeepAlive();
+        // Stop timers
         this.stopInactivityTimer();
         
         // Clear batch timer

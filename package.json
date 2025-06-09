@@ -15,8 +15,6 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "example": "node example.js",
-    "dev": "node --inspect example.js",
     "prepare": "npm run check",
     "check": "node -c index.js && node -c ipcprovider.js"
   },
