@@ -1,7 +1,7 @@
 {
   "name": "@bcoders.gr/provider",
-  "version": "1.2.2",
-  "description": "High-Performance IPC Ethereum Provider with Advanced Optimizations",
+  "version": "2.0.0",
+  "description": "High-Performance IPC Ethereum Provider with Advanced Optimizations - Refactored for Better Performance",
   "main": "index.js",
   "module": "index.js",
   "types": "index.d.ts",
@@ -10,13 +10,36 @@
       "import": "./index.js",
       "require": "./index.js",
       "types": "./index.d.ts"
+    },
+    "./connection": {
+      "import": "./src/connection-manager.js"
+    },
+    "./cache": {
+      "import": "./src/cache-manager.js"
+    },
+    "./parser": {
+      "import": "./src/json-parser.js"
+    },
+    "./batch": {
+      "import": "./src/batch-processor.js"
+    },
+    "./metrics": {
+      "import": "./src/metrics-manager.js"
+    },
+    "./pool": {
+      "import": "./src/request-pool.js"
     }
   },
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/quick-fix-tests.js",
+    "test:comprehensive": "node tests/test-runner.js",
     "prepare": "npm run check",
-    "check": "node -c index.js && node -c ipcprovider.js"
+    "check": "node -c index.js && node -c src/ipc-provider.js && node -c src/connection-manager.js && node -c src/cache-manager.js && node -c src/json-parser.js && node -c src/batch-processor.js && node -c src/metrics-manager.js && node -c src/request-pool.js",
+    "benchmark": "node benchmarks/performance-test.js",
+    "validate": "npm run check && npm run test",
+    "demo:evm": "node examples/evm-methods-demo.js",
+    "demo:testing": "node examples/testing-methods-demo.js"
   },
   "keywords": [
     "ethereum",
@@ -31,7 +54,10 @@
     "ethereum-provider",
     "high-performance",
     "caching",
-    "batching"
+    "batching",
+    "modular",
+    "optimized",
+    "memory-efficient"
   ],
   "author": "pagovitsa",
   "license": "MIT",
@@ -51,5 +77,8 @@
   },
   "dependencies": {
     "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "benchmark": "^2.1.4"
   }
 }
