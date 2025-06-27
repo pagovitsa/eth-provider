@@ -89,6 +89,11 @@ export class IPCProvider {
 
         // Set up event handlers
         this.setupEventHandlers();
+
+        // Automatically connect on instantiation
+        this.connect().catch(err => {
+            this.logger.error('Failed to connect on instantiation:', err);
+        });
     }
 
     /**
@@ -121,15 +126,15 @@ export class IPCProvider {
 
     /**
      * Handle incoming data from IPC connection
-     * @param {Buffer} data - Raw data buffer
      */
     handleIncomingData(data) {
         const responses = this.jsonParser.processData(data);
         
         for (const response of responses) {
             if (response.id && this.pendingRequests.has(response.id)) {
-                const { resolve, reject, tracking } = this.pendingRequests.get(response.id);
+                const { resolve, reject, tracking, timeout } = this.pendingRequests.get(response.id);
                 this.pendingRequests.delete(response.id);
+                clearTimeout(timeout);
 
                 if (response.error) {
                     this.metrics.recordRequestFailure(tracking, new Error(response.error.message));
@@ -151,7 +156,6 @@ export class IPCProvider {
 
     /**
      * Process a batch of requests
-     * @param {object} batch - Batch object containing requests
      */
     async processBatch({ batchId, requests, items }) {
         try {
@@ -167,23 +171,40 @@ export class IPCProvider {
      * Connect to IPC endpoint
      */
     async connect() {
+        if (this.connection.isConnected) {
+            return;
+        }
         await this.connection.connect();
+        this.logger.log('Provider connected to IPC socket');
+    }
+
+    /**
+     * Ensure connection is established
+     */
+    async ensureConnected() {
+        if (!this.connection.isConnected) {
+            await this.connect();
+        }
     }
 
     /**
      * Make an RPC request
-     * @param {string} method - RPC method
-     * @param {Array} params - Method parameters
-     * @returns {Promise} Request promise
      */
-    async request(method, params = []) {
-        if (!this.connection.isConnected) {
-            throw new Error('Not connected to IPC socket');
+    async request(methodOrPayload, params) {
+        await this.ensureConnected();
+
+        let method, parameters;
+        
+        if (typeof methodOrPayload === 'object') {
+            method = methodOrPayload.method;
+            parameters = methodOrPayload.params || [];
+        } else {
+            method = methodOrPayload;
+            parameters = params || [];
         }
 
-        // Check cache for read-only methods
         if (this.readOnlyMethods.has(method)) {
-            const cacheKey = `${method}:${JSON.stringify(params)}`;
+            const cacheKey = `${method}:${JSON.stringify(parameters)}`;
             const cached = this.cache.get(cacheKey);
             if (cached !== null) {
                 return cached;
@@ -192,10 +213,15 @@ export class IPCProvider {
 
         const id = uuidv4();
         const tracking = this.metrics.recordRequestStart(method, id);
-        const request = this.requestPool.getRequest(id, method, params);
+        
+        const request = {
+            jsonrpc: '2.0',
+            id,
+            method,
+            params: parameters
+        };
 
-        const promise = new Promise((resolve, reject) => {
-            // Set up request timeout
+        return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 if (this.pendingRequests.has(id)) {
                     this.pendingRequests.delete(id);
@@ -206,99 +232,34 @@ export class IPCProvider {
 
             this.pendingRequests.set(id, { resolve, reject, tracking, timeout });
 
-            // Use batch processor if enabled
-            if (this.batchProcessor.enabled) {
-                this.batchProcessor.addRequest(request).catch(reject);
-            } else {
-                try {
-                    const requestJson = JSON.stringify(request) + '\n';
-                    this.connection.write(requestJson);
-                } catch (error) {
-                    this.pendingRequests.delete(id);
-                    clearTimeout(timeout);
-                    this.metrics.recordRequestFailure(tracking, error);
-                    reject(error);
-                }
+            try {
+                const requestJson = JSON.stringify(request) + '\n';
+                this.connection.write(requestJson);
+            } catch (error) {
+                this.pendingRequests.delete(id);
+                clearTimeout(timeout);
+                this.metrics.recordRequestFailure(tracking, error);
+                reject(error);
             }
         });
-
-        // Cleanup after promise settles
-        promise.finally(() => {
-            this.requestPool.returnRequest(request);
-        });
-
-        return promise;
     }
 
     /**
      * Disconnect from IPC endpoint
      */
     async disconnect() {
-        // Process any remaining batches
-        if (this.batchProcessor.enabled) {
-            this.batchProcessor.clear();
+        if (this.connection.isConnected) {
+            await this.connection.disconnect();
+            this.logger.log('Provider disconnected from IPC socket');
         }
-
-        // Reject all pending requests
-        for (const [id, { reject, timeout }] of this.pendingRequests) {
-            clearTimeout(timeout);
-            reject(new Error('Provider disconnected'));
-        }
-        this.pendingRequests.clear();
-
-        // Clear cache
-        this.cache.clear();
-
-        // Disconnect socket
-        await this.connection.disconnect();
-
-        // Final metrics update
-        this.updateMetrics();
     }
 
-    /**
-     * Update and collect metrics from all components
-     */
-    updateMetrics() {
-        // Update component metrics
-        this.metrics.recordCacheMetrics(this.cache.getStats());
-        this.metrics.recordBatchMetrics(this.batchProcessor.getStats());
-        
-        const memoryStats = {
-            bufferSize: this.jsonParser.getBufferSize(),
-            cacheSize: this.cache.getStats().size,
-            poolSize: this.requestPool.getStats().totalPoolSize
-        };
-        this.metrics.recordMemoryMetrics(memoryStats);
+    // Ethereum JSON-RPC method implementations
+    async getBlockNumber() {
+        const result = await this.request('eth_blockNumber');
+        return typeof result === 'string' ? parseInt(result, 16) : result;
     }
 
-    /**
-     * Get comprehensive provider statistics
-     */
-    getStats() {
-        this.updateMetrics();
-        return {
-            metrics: this.metrics.getMetrics(),
-            connection: this.connection.getStatus(),
-            cache: this.cache.getStats(),
-            parser: this.jsonParser.getStats(),
-            batch: this.batchProcessor.getStats(),
-            pool: this.requestPool.getStats()
-        };
-    }
-
-    /**
-     * Print performance summary
-     */
-    printStats() {
-        this.metrics.printSummary();
-    }
-
-    // ========================================
-    // ETHEREUM JSON-RPC METHOD IMPLEMENTATIONS
-    // ========================================
-
-    // Account Methods
     async getBalance(address, blockTag = 'latest') {
         const result = await this.request('eth_getBalance', [address, blockTag]);
         return typeof result === 'string' ? BigInt(result).toString() : result;
@@ -309,243 +270,7 @@ export class IPCProvider {
         return typeof result === 'string' ? parseInt(result, 16) : result;
     }
 
-    async getCode(address, blockTag = 'latest') {
-        return await this.request('eth_getCode', [address, blockTag]);
-    }
-
-    async getStorageAt(address, position, blockTag = 'latest') {
-        return await this.request('eth_getStorageAt', [address, position, blockTag]);
-    }
-
-    // Block Methods
-    async getBlockNumber() {
-        const result = await this.request('eth_blockNumber');
-        return typeof result === 'string' ? parseInt(result, 16).toString() : result;
-    }
-
-    async getBlockByNumber(blockNumber, fullTransactions = false) {
-        const blockTag = typeof blockNumber === 'number' ? this.toHex(blockNumber) : blockNumber;
-        return await this.request('eth_getBlockByNumber', [blockTag, fullTransactions]);
-    }
-
-    async getBlockByHash(blockHash, fullTransactions = false) {
-        return await this.request('eth_getBlockByHash', [blockHash, fullTransactions]);
-    }
-
-    async getBlockTransactionCountByNumber(blockNumber) {
-        const blockTag = typeof blockNumber === 'number' ? this.toHex(blockNumber) : blockNumber;
-        const result = await this.request('eth_getBlockTransactionCountByNumber', [blockTag]);
-        return typeof result === 'string' ? parseInt(result, 16) : result;
-    }
-
-    async getBlockTransactionCountByHash(blockHash) {
-        const result = await this.request('eth_getBlockTransactionCountByHash', [blockHash]);
-        return typeof result === 'string' ? parseInt(result, 16) : result;
-    }
-
-    async getUncleCountByBlockNumber(blockNumber) {
-        const blockTag = typeof blockNumber === 'number' ? this.toHex(blockNumber) : blockNumber;
-        const result = await this.request('eth_getUncleCountByBlockNumber', [blockTag]);
-        return typeof result === 'string' ? parseInt(result, 16) : result;
-    }
-
-    async getUncleCountByBlockHash(blockHash) {
-        const result = await this.request('eth_getUncleCountByBlockHash', [blockHash]);
-        return typeof result === 'string' ? parseInt(result, 16) : result;
-    }
-
-    async getUncleByBlockNumberAndIndex(blockNumber, index) {
-        const blockTag = typeof blockNumber === 'number' ? this.toHex(blockNumber) : blockNumber;
-        const uncleIndex = typeof index === 'number' ? this.toHex(index) : index;
-        return await this.request('eth_getUncleByBlockNumberAndIndex', [blockTag, uncleIndex]);
-    }
-
-    async getUncleByBlockHashAndIndex(blockHash, index) {
-        const uncleIndex = typeof index === 'number' ? this.toHex(index) : index;
-        return await this.request('eth_getUncleByBlockHashAndIndex', [blockHash, uncleIndex]);
-    }
-
-    // Transaction Methods
-    async sendTransaction(txObject) {
-        return await this.request('eth_sendTransaction', [txObject]);
-    }
-
-    async sendRawTransaction(signedTx) {
-        return await this.request('eth_sendRawTransaction', [signedTx]);
-    }
-
-    async getTransactionByHash(txHash) {
-        return await this.request('eth_getTransactionByHash', [txHash]);
-    }
-
-    async getTransactionByBlockNumberAndIndex(blockNumber, index) {
-        const blockTag = typeof blockNumber === 'number' ? this.toHex(blockNumber) : blockNumber;
-        const txIndex = typeof index === 'number' ? this.toHex(index) : index;
-        return await this.request('eth_getTransactionByBlockNumberAndIndex', [blockTag, txIndex]);
-    }
-
-    async getTransactionByBlockHashAndIndex(blockHash, index) {
-        const txIndex = typeof index === 'number' ? this.toHex(index) : index;
-        return await this.request('eth_getTransactionByBlockHashAndIndex', [blockHash, txIndex]);
-    }
-
-    async getTransactionReceipt(txHash) {
-        return await this.request('eth_getTransactionReceipt', [txHash]);
-    }
-
-    // Gas and Fee Methods
-    async getGasPrice() {
-        const result = await this.request('eth_gasPrice');
-        return typeof result === 'string' ? BigInt(result).toString() : result;
-    }
-
-    async estimateGas(txObject, blockTag = 'latest') {
-        const result = await this.request('eth_estimateGas', [txObject, blockTag]);
-        return typeof result === 'string' ? parseInt(result, 16).toString() : result;
-    }
-
-    async feeHistory(blockCount, newestBlock = 'latest', rewardPercentiles = []) {
-        const count = typeof blockCount === 'number' ? this.toHex(blockCount) : blockCount;
-        const newest = typeof newestBlock === 'number' ? this.toHex(newestBlock) : newestBlock;
-        return await this.request('eth_feeHistory', [count, newest, rewardPercentiles]);
-    }
-
-    async maxPriorityFeePerGas() {
-        const result = await this.request('eth_maxPriorityFeePerGas');
-        return typeof result === 'string' ? BigInt(result).toString() : result;
-    }
-
-    // Contract Interaction Methods
-    async call(callObject, blockTag = 'latest') {
-        return await this.request('eth_call', [callObject, blockTag]);
-    }
-
-    async createAccessList(callObject, blockTag = 'latest') {
-        return await this.request('eth_createAccessList', [callObject, blockTag]);
-    }
-
-    // Filter and Log Methods
-    async newFilter(filterObject) {
-        return await this.request('eth_newFilter', [filterObject]);
-    }
-
-    async newBlockFilter() {
-        return await this.request('eth_newBlockFilter');
-    }
-
-    async newPendingTransactionFilter() {
-        return await this.request('eth_newPendingTransactionFilter');
-    }
-
-    async uninstallFilter(filterId) {
-        return await this.request('eth_uninstallFilter', [filterId]);
-    }
-
-    async getFilterChanges(filterId) {
-        return await this.request('eth_getFilterChanges', [filterId]);
-    }
-
-    async getFilterLogs(filterId) {
-        return await this.request('eth_getFilterLogs', [filterId]);
-    }
-
-    async getLogs(filterObject) {
-        return await this.request('eth_getLogs', [filterObject]);
-    }
-
-    // Network and Node Methods
-    async chainId() {
-        const result = await this.request('eth_chainId');
-        return typeof result === 'string' ? parseInt(result, 16) : result;
-    }
-
-    async netVersion() {
-        return await this.request('net_version');
-    }
-
-    async netListening() {
-        return await this.request('net_listening');
-    }
-
-    async netPeerCount() {
-        const result = await this.request('net_peerCount');
-        return typeof result === 'string' ? parseInt(result, 16) : result;
-    }
-
-    async protocolVersion() {
-        return await this.request('eth_protocolVersion');
-    }
-
-    async syncing() {
-        return await this.request('eth_syncing');
-    }
-
-    async coinbase() {
-        return await this.request('eth_coinbase');
-    }
-
-    async mining() {
-        return await this.request('eth_mining');
-    }
-
-    async hashrate() {
-        const result = await this.request('eth_hashrate');
-        return typeof result === 'string' ? parseInt(result, 16) : result;
-    }
-
-    async getWork() {
-        return await this.request('eth_getWork');
-    }
-
-    async submitWork(nonce, powHash, mixDigest) {
-        return await this.request('eth_submitWork', [nonce, powHash, mixDigest]);
-    }
-
-    async submitHashrate(hashrate, id) {
-        return await this.request('eth_submitHashrate', [hashrate, id]);
-    }
-
-    // Account Management (if supported)
-    async accounts() {
-        return await this.request('eth_accounts');
-    }
-
-    async sign(address, message) {
-        return await this.request('eth_sign', [address, message]);
-    }
-
-    async signTransaction(txObject) {
-        return await this.request('eth_signTransaction', [txObject]);
-    }
-
-    // Debug and Trace Methods (if supported by client)
-    async debugTraceTransaction(txHash, options = {}) {
-        return await this.request('debug_traceTransaction', [txHash, options]);
-    }
-
-    async debugTraceCall(callObject, blockTag = 'latest', options = {}) {
-        return await this.request('debug_traceCall', [callObject, blockTag, options]);
-    }
-
-    async debugTraceBlockByNumber(blockNumber, options = {}) {
-        const blockTag = typeof blockNumber === 'number' ? this.toHex(blockNumber) : blockNumber;
-        return await this.request('debug_traceBlockByNumber', [blockTag, options]);
-    }
-
-    async debugTraceBlockByHash(blockHash, options = {}) {
-        return await this.request('debug_traceBlockByHash', [blockHash, options]);
-    }
-
-    // Web3 Methods
-    async web3ClientVersion() {
-        return await this.request('web3_clientVersion');
-    }
-
-    async web3Sha3(data) {
-        return await this.request('web3_sha3', [data]);
-    }
-
-    // Utility Methods
+    // Helper methods
     toHex(value) {
         if (typeof value === 'string') {
             if (value.startsWith('0x')) return value;
@@ -556,140 +281,6 @@ export class IPCProvider {
 
     fromHex(hexString) {
         return parseInt(hexString, 16);
-    }
-
-    toWei(value, unit = 'ether') {
-        const units = {
-            wei: 1n,
-            kwei: 1000n,
-            mwei: 1000000n,
-            gwei: 1000000000n,
-            szabo: 1000000000000n,
-            finney: 1000000000000000n,
-            ether: 1000000000000000000n
-        };
-        
-        const multiplier = units[unit.toLowerCase()];
-        if (!multiplier) throw new Error(`Unknown unit: ${unit}`);
-        
-        return (BigInt(value) * multiplier).toString();
-    }
-
-    fromWei(value, unit = 'ether') {
-        const units = {
-            wei: 1n,
-            kwei: 1000n,
-            mwei: 1000000n,
-            gwei: 1000000000n,
-            szabo: 1000000000000n,
-            finney: 1000000000000000n,
-            ether: 1000000000000000000n
-        };
-        
-        const divisor = units[unit.toLowerCase()];
-        if (!divisor) throw new Error(`Unknown unit: ${unit}`);
-        
-        return (BigInt(value) / divisor).toString();
-    }
-
-    // Batch request helper
-    async batchRequest(requests) {
-        const promises = requests.map(req => this.request(req.method, req.params));
-        return await Promise.all(promises);
-    }
-
-    // ========================================
-    // CUSTOM TESTING AND DEVELOPMENT METHODS
-    // ========================================
-
-    /**
-     * Mine a new block (for testing)
-     * @returns {Promise<number|null>} The new block number or null if mining failed
-     */
-    async mine() {
-        const result = await this.request('evm_mine', []);
-        if (result !== false) {
-            this.blocknumber = await this.getBlockNumber();
-            return this.blocknumber;
-        }
-        return null;
-    }
-
-    /**
-     * Reset the chain to initial state (for testing with Anvil)
-     * @returns {Promise<boolean>} Success status
-     */
-    async reset() {
-        this.snapdelete();
-        const result = await this.request('anvil_reset', [{ 
-            forking: { jsonRpcUrl: this.ipcPath } 
-        }]);
-        
-        if (result !== false) {
-            this.snap = await this.request('evm_snapshot', []);
-            this.blocknumber = await this.getBlockNumber();
-            this.forkedblock = this.blocknumber;
-        }
-        return result;
-    }
-
-    /**
-     * Reset to last snapshot or create new one
-     * @returns {Promise<void>}
-     */
-    async snapreset() {
-        if (!this.snap) {
-            await this.reset();
-        } else {
-            const revertResult = await this.request('evm_revert', [this.snap]);
-            if (revertResult !== false) {
-                this.snap = await this.request('evm_snapshot', []);
-                this.blocknumber = await this.getBlockNumber();
-                this.forkedblock = this.blocknumber;
-            }
-        }
-    }
-
-    /**
-     * Delete current snapshot
-     */
-    snapdelete() {
-        if (this.snap) {
-            delete this.snap;
-        }
-    }
-
-    /**
-     * Get mint events for a specific address within a block range
-     * @param {string} address - Contract address
-     * @param {number|string} fromBlock - Start block
-     * @param {number|string} toBlock - End block
-     * @returns {Promise<Array>} Array of mint events
-     */
-    async getMint(address, fromBlock, toBlock) {
-        return await this.request('eth_getLogs', [{
-            fromBlock: this.toHex(fromBlock),
-            toBlock: this.toHex(toBlock),
-            address: address,
-            topics: ['0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f']
-        }]);
-    }
-
-    /**
-     * Get past logs for a specific address within a block range with custom topics
-     * @param {string} address - Contract address
-     * @param {number|string} fromBlock - Start block
-     * @param {number|string} toBlock - End block
-     * @param {Array<string>} topic - Array of topics to filter
-     * @returns {Promise<Array>} Array of matching logs
-     */
-    async getPastLogs(address, fromBlock, toBlock, topic) {
-        return await this.request('eth_getLogs', [{
-            fromBlock: this.toHex(fromBlock),
-            toBlock: this.toHex(toBlock),
-            address: address,
-            topics: topic
-        }]);
     }
 }
 
