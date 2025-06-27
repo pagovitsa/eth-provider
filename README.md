@@ -16,13 +16,13 @@ This refactored version delivers significant performance improvements through:
 ## 📦 Installation
 
 ```bash
-npm install @bcoders.gr/provider
+npm install @bcoders.gr/eth-provider
 ```
 
 ## 🔧 Quick Start
 
 ```javascript
-import { IPCProvider } from '@bcoders.gr/provider';
+import { IPCProvider } from '@bcoders.gr/eth-provider';
 
 const provider = new IPCProvider('/path/to/geth.ipc', {
   // Performance options
